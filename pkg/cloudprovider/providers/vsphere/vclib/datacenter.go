@@ -82,6 +82,32 @@ func (dc *Datacenter) GetVMByUUID(ctx context.Context, vmUUID string) (*VirtualM
 	return &virtualMachine, nil
 }
 
+func (dc *Datacenter) GetHostByVMUUID(ctx context.Context, vmUUID string) (*types.ManagedObjectReference, error) {
+	s := object.NewSearchIndex(dc.Client())
+	vmUUID = strings.ToLower(strings.TrimSpace(vmUUID))
+	svm, err := s.FindByUuid(ctx, dc.Datacenter, vmUUID, true, nil)
+	if err != nil {
+		glog.Errorf("Failed to find VM by UUID. VM UUID: %s, err: %+v", vmUUID, err)
+		return nil, err
+	}
+	if svm == nil {
+		glog.Errorf("Unable to find VM by UUID. VM UUID: %s", vmUUID)
+		return nil, ErrNoVMFound
+	}
+	virtualMachine := VirtualMachine{object.NewVirtualMachine(dc.Client(), svm.Reference()), dc}
+
+	var vmMo mo.VirtualMachine
+	pc := property.DefaultCollector(virtualMachine.Client())
+	err = pc.RetrieveOne(ctx, virtualMachine.Reference(), []string{"summary.runtime.host"}, &vmMo)
+	if err != nil {
+		glog.Errorf("Failed to retrive VM runtime host, err: %v", err)
+		return nil, err
+	}
+	host := vmMo.Summary.Runtime.Host
+	glog.Infof("%s host is %s", virtualMachine.Reference(), vmMo.Summary.Runtime.Host)
+	return host, nil
+}
+
 // GetVMByPath gets the VM object from the given vmPath
 // vmPath should be the full path to VM and not just the name
 func (dc *Datacenter) GetVMByPath(ctx context.Context, vmPath string) (*VirtualMachine, error) {
