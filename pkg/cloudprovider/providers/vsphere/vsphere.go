@@ -42,6 +42,9 @@ import (
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere/vclib"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere/vclib/diskmanagers"
 	"k8s.io/kubernetes/pkg/controller"
+
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere/vclib/tagmanagers"
+	// "k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/types"
 )
 
 // VSphere Cloud Provider constants
@@ -155,6 +158,8 @@ type VSphereConfig struct {
 		SecretName string `gcfg:"secret-name"`
 		// Secret Namespace where secret will be present that has vCenter credentials.
 		SecretNamespace string `gcfg:"secret-namespace"`
+
+		LegacyMode bool `gcfg:"legacyMode"`
 	}
 
 	VirtualCenter map[string]*VirtualCenterConfig
@@ -176,6 +181,13 @@ type VSphereConfig struct {
 		Folder           string `gcfg:"folder"`
 		DefaultDatastore string `gcfg:"default-datastore"`
 		ResourcePoolPath string `gcfg:"resourcepool-path"`
+	}
+	// Tag categories and tags which correspond to topologyKey
+	Tags struct {
+		Zone             string `gcfg:"zone"`
+		Region           string `gcfg:"region"`
+		AllowEmptyZone   bool   `gcfg:"allowEmptyZone"`
+		AllowEmptyRegion bool   `gcfg:"allowEmptyRegion"`
 	}
 }
 
@@ -510,8 +522,11 @@ func buildVSphereFromConfig(cfg VSphereConfig) (*VSphere, error) {
 
 func logout(vs *VSphere) {
 	for _, vsphereIns := range vs.vsphereInstanceMap {
-		vsphereIns.conn.Logout(context.TODO())
+		if vsphereIns.conn.Client != nil {
+			vsphereIns.conn.Logout(context.TODO())
+		}
 	}
+
 }
 
 // Instances returns an implementation of Instances for vSphere.
@@ -796,8 +811,8 @@ func (vs *VSphere) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 
 // Zones returns an implementation of Zones for vSphere.
 func (vs *VSphere) Zones() (cloudprovider.Zones, bool) {
-	glog.V(1).Info("The vSphere cloud provider does not support zones")
-	return nil, false
+	//glog.V(1).Info("The vSphere cloud provider does not support zones")
+	return vs, true
 }
 
 // Routes returns a false since the interface is not supported for vSphere.
@@ -846,7 +861,7 @@ func (vs *VSphere) AttachDisk(vmDiskPath string, storagePolicyName string, nodeN
 			if err == nil {
 				glog.V(4).Infof("AttachDisk: Found node %q", convertToString(nodeName))
 				diskUUID, err = attachDiskInternal(vmDiskPath, storagePolicyName, nodeName)
-				glog.V(4).Infof("AttachDisk: Retry: diskUUID %s, err +%v", diskUUID, err)
+				glog.V(4).Infof("AttachDisk: Retry: diskUUID %s, err +%v", convertToString(nodeName), diskUUID, err)
 			}
 		}
 	}
@@ -963,7 +978,7 @@ func (vs *VSphere) DiskIsAttached(volPath string, nodeName k8stypes.NodeName) (b
 				volPath,
 				vSphereInstance)
 		}
-		glog.V(4).Infof("DiskIsAttached result: %v and error: %q, for volume: %q", attached, err, volPath)
+		glog.V(4).Infof("DiskIsAttached result: %q and error: %q, for volume: %q", attached, err, volPath)
 		return attached, err
 	}
 	requestTime := time.Now()
@@ -1054,7 +1069,7 @@ func (vs *VSphere) DisksAreAttached(nodeVolumes map[k8stypes.NodeName][]string) 
 			return nodesToRetry, nil
 		}
 
-		glog.V(4).Infof("Starting DisksAreAttached API for vSphere with nodeVolumes: %+v", nodeVolumes)
+		glog.V(4).Info("Starting DisksAreAttached API for vSphere with nodeVolumes: %+v", nodeVolumes)
 		// Create context
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1293,4 +1308,239 @@ func (vs *VSphere) NodeManager() (nodeManager *NodeManager) {
 		return nil
 	}
 	return vs.nodeManager
+}
+
+func (vs *VSphere) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
+	nodeName, err := vs.CurrentNodeName(ctx, vs.hostName)
+	if err != nil {
+		glog.Errorf("Cannot get node name.")
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{}
+	// pretty.Printf("U=%# v\n", vs.cfg)
+
+	//No zones support
+	if vs.cfg.Global.LegacyMode {
+		glog.Infof("No zones support")
+		return zone, nil
+	}
+
+	vsi, err := vs.getVSphereInstanceForServer(vs.cfg.Workspace.VCenterIP, ctx)
+
+	if err != nil {
+		glog.Errorf("Cannot connent to vsphere. Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+
+	dc, err := vclib.GetDatacenter(ctx, vsi.conn, vs.cfg.Workspace.Datacenter)
+	if err != nil {
+		glog.Errorf("Cannot connent to datacenter. Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+
+	vmHost, err := dc.GetHostByVMUUID(ctx, vs.vmUUID)
+	if err != nil {
+		glog.Errorf("Cannot find VM runtime host. Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+
+	client := vsi.conn
+	zoneManagers := tagmanagers.NewTagManagers(client)
+	err = zoneManagers.WithLogout(ctx, func(client *tagmanagers.RestClient) error {
+
+		tags, err := client.ListAttachedTags(
+			ctx,
+			vmHost,
+		)
+
+		if err != nil {
+			glog.Errorf("Cannot list attached tags. Get zone for node %s error", nodeName)
+			return err
+		}
+
+		for _, value := range tags {
+			tag, err := client.GetTag(ctx, value)
+			if err != nil {
+				glog.Errorf("Get tag %s error", value)
+				return err
+			}
+			category, err := client.GetCategory(ctx, tag.CategoryID)
+			if err != nil {
+				glog.Errorf("Get category %s error", value)
+				return err
+			}
+
+			switch {
+
+			case category.Name == "k8s-io-zone":
+				zone.FailureDomain = tag.Name
+
+			case category.Name == "k8s-io-region":
+				zone.Region = tag.Name
+
+			case category.Name == vs.cfg.Tags.Zone:
+				zone.FailureDomain = tag.Name
+
+			case category.Name == vs.cfg.Tags.Region:
+				zone.Region = tag.Name
+
+			default:
+				zone.FailureDomain = ""
+				zone.Region = ""
+			}
+		}
+
+		switch {
+		case zone.Region == "":
+			if vs.cfg.Tags.AllowEmptyRegion {
+				glog.Warningf("You have no region tag for node %s ", nodeName)
+				return nil
+			}
+			return fmt.Errorf("Please add region tag for node %s ", nodeName)
+
+		case zone.FailureDomain == "":
+			if vs.cfg.Tags.AllowEmptyZone {
+				glog.Warningf("You have no zone tag for node %s ", nodeName)
+				return nil
+			}
+			return fmt.Errorf("Please add zone tag for node %s ", nodeName)
+
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Errorf("Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+	return zone, nil
+}
+
+func (vs *VSphere) GetZoneByNodeName(ctx context.Context, nodeName k8stypes.NodeName) (cloudprovider.Zone, error) {
+	nodeinfo, err := vs.nodeManager.GetNodeInfo(nodeName)
+	if err != nil {
+		glog.Errorf("Cannot get node info.")
+		return cloudprovider.Zone{}, err
+	}
+
+	vsi, err := vs.getVSphereInstance(nodeName)
+	if err != nil {
+		glog.Errorf("Cannot get vsphere instance. Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{}
+	zoneManagers := tagmanagers.NewTagManagers(vsi.conn)
+
+	err = zoneManagers.WithLogout(ctx, func(client *tagmanagers.RestClient) error {
+		ref := nodeinfo.VM().VirtualMachine.Reference()
+		tags, err := client.ListAttachedTags(
+			ctx,
+			&ref,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, value := range tags {
+			tag, err := client.GetTag(ctx, value)
+
+			if err != nil {
+				glog.Errorf("Get tag %s error", value)
+				return err
+			}
+			category, err := client.GetCategory(ctx, tag.CategoryID)
+			if err != nil {
+				glog.Errorf("Get category %s error", value)
+				return err
+			}
+
+			switch {
+			case category.Name == "zone":
+				zone.FailureDomain = tag.Name
+
+			case category.Name == "region":
+				zone.Region = tag.Name
+
+			default:
+				zone.FailureDomain = ""
+				zone.Region = ""
+			}
+		}
+		if zone.Region == "" || zone.FailureDomain == "" {
+			glog.Warningf("Zones missing field. Please add region or zone tag for node %s ", nodeName)
+		}
+		return nil
+	})
+
+	if err != nil {
+		glog.Errorf("Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+	return zone, nil
+}
+
+func (vs *VSphere) GetZoneByProviderID(ctx context.Context, providerID string) (cloudprovider.Zone, error) {
+	nodeName := convertToK8sType(providerID)
+	nodeinfo, err := vs.nodeManager.GetNodeInfo(nodeName)
+	if err != nil {
+		glog.Errorf("Cannot get node info.")
+		return cloudprovider.Zone{}, err
+	}
+
+	vsi, err := vs.getVSphereInstance(nodeName)
+	if err != nil {
+		glog.Errorf("Cannot get vsphere instance. Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+
+	zone := cloudprovider.Zone{}
+	zoneManagaers := tagmanagers.NewTagManagers(vsi.conn)
+	err = zoneManagaers.WithLogout(ctx, func(client *tagmanagers.RestClient) error {
+		ref := nodeinfo.VM().VirtualMachine.Reference()
+		tags, err := client.ListAttachedTags(
+			ctx,
+			&ref,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, value := range tags {
+			tag, err := client.GetTag(ctx, value)
+
+			if err != nil {
+				glog.Errorf("Get tag %s error", value)
+				continue
+			}
+			category, err := client.GetCategory(ctx, tag.CategoryID)
+			if err != nil {
+				glog.Errorf("Get category %s error", value)
+				continue
+			}
+
+			switch {
+			case category.Name == "zone":
+				zone.FailureDomain = tag.Name
+
+			case category.Name == "region":
+				zone.Region = tag.Name
+
+			default:
+				zone.FailureDomain = ""
+				zone.Region = ""
+			}
+
+		}
+
+		if zone.Region == "" || zone.FailureDomain == "" {
+			glog.Warningf("Zones missing field. Please add region or zone tag for node %s ", nodeName)
+		}
+		return nil
+	})
+	if err != nil {
+		glog.Errorf("Get zone for node %s error", nodeName)
+		return cloudprovider.Zone{}, err
+	}
+	return zone, nil
 }
