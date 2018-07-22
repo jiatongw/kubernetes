@@ -811,7 +811,10 @@ func (vs *VSphere) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 
 // Zones returns an implementation of Zones for vSphere.
 func (vs *VSphere) Zones() (cloudprovider.Zones, bool) {
-	//glog.V(1).Info("The vSphere cloud provider does not support zones")
+	if vs.cfg.Global.LegacyMode {
+		glog.V(1).Info("The vSphere cloud provider does not support zones")
+		return nil, false
+	}
 	return vs, true
 }
 
@@ -1319,12 +1322,6 @@ func (vs *VSphere) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
 
 	zone := cloudprovider.Zone{}
 	// pretty.Printf("U=%# v\n", vs.cfg)
-
-	//No zones support
-	if vs.cfg.Global.LegacyMode {
-		glog.Infof("No zones support")
-		return zone, nil
-	}
 
 	vsi, err := vs.getVSphereInstanceForServer(vs.cfg.Workspace.VCenterIP, ctx)
 
