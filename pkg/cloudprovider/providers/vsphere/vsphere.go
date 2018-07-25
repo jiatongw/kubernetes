@@ -158,8 +158,6 @@ type VSphereConfig struct {
 		SecretName string `gcfg:"secret-name"`
 		// Secret Namespace where secret will be present that has vCenter credentials.
 		SecretNamespace string `gcfg:"secret-namespace"`
-
-		LegacyMode bool `gcfg:"legacyMode"`
 	}
 
 	VirtualCenter map[string]*VirtualCenterConfig
@@ -183,11 +181,9 @@ type VSphereConfig struct {
 		ResourcePoolPath string `gcfg:"resourcepool-path"`
 	}
 	// Tag categories and tags which correspond to topologyKey
-	Tags struct {
-		Zone             string `gcfg:"zone"`
-		Region           string `gcfg:"region"`
-		AllowEmptyZone   bool   `gcfg:"allowEmptyZone"`
-		AllowEmptyRegion bool   `gcfg:"allowEmptyRegion"`
+	Labels struct {
+		Zone   string `gcfg:"zone"`
+		Region string `gcfg:"region"`
 	}
 }
 
@@ -811,10 +807,6 @@ func (vs *VSphere) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 
 // Zones returns an implementation of Zones for vSphere.
 func (vs *VSphere) Zones() (cloudprovider.Zones, bool) {
-	if vs.cfg.Global.LegacyMode {
-		glog.V(1).Info("The vSphere cloud provider does not support zones")
-		return nil, false
-	}
 	return vs, true
 }
 
@@ -1370,16 +1362,10 @@ func (vs *VSphere) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
 
 			switch {
 
-			case category.Name == "k8s-io-zone":
+			case category.Name == vs.cfg.Labels.Zone:
 				zone.FailureDomain = tag.Name
 
-			case category.Name == "k8s-io-region":
-				zone.Region = tag.Name
-
-			case category.Name == vs.cfg.Tags.Zone:
-				zone.FailureDomain = tag.Name
-
-			case category.Name == vs.cfg.Tags.Region:
+			case category.Name == vs.cfg.Labels.Region:
 				zone.Region = tag.Name
 
 			default:
@@ -1390,19 +1376,18 @@ func (vs *VSphere) GetZone(ctx context.Context) (cloudprovider.Zone, error) {
 
 		switch {
 		case zone.Region == "":
-			if vs.cfg.Tags.AllowEmptyRegion {
-				glog.Warningf("You have no region tag for node %s ", nodeName)
-				return nil
+			if vs.cfg.Labels.Zone != "" {
+				return fmt.Errorf("The zone in vSphere configuration file not match for node %s ", nodeName)
 			}
-			return fmt.Errorf("Please add region tag for node %s ", nodeName)
+			glog.Infof("No zones support for node %s error", nodeName)
+			return nil
 
 		case zone.FailureDomain == "":
-			if vs.cfg.Tags.AllowEmptyZone {
-				glog.Warningf("You have no zone tag for node %s ", nodeName)
-				return nil
+			if vs.cfg.Labels.Region != "" {
+				return fmt.Errorf("The zone in vSphere configuration file not match for node %s ", nodeName)
 			}
-			return fmt.Errorf("Please add zone tag for node %s ", nodeName)
-
+			glog.Infof("No zones support for node %s error", nodeName)
+			return nil
 		}
 		return nil
 	})
