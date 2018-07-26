@@ -12,13 +12,13 @@ type TagManagers struct {
 }
 
 func NewTagManagers(connection *vclib.VSphereConnection) TagManagers {
-	vsUrl := connection.Client.URL()
-	vsUrl.User = url.UserPassword(connection.Username, connection.Password)
+	vsURL := connection.Client.URL()
+	vsURL.User = url.UserPassword(connection.Username, connection.Password)
 
 	return TagManagers{
 		Client: NewClient(
-			vsUrl,
-			true,
+			vsURL,
+			connection.Insecure,
 			"",
 		),
 	}

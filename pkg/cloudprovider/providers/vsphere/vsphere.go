@@ -44,7 +44,6 @@ import (
 	"k8s.io/kubernetes/pkg/controller"
 
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere/vclib/tagmanagers"
-	// "k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/types"
 )
 
 // VSphere Cloud Provider constants
